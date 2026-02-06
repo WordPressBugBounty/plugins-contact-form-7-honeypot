@@ -160,8 +160,12 @@ export async function migrate() {
  */
 export async function getCF7Entries( { page = 1, perPage = 10, form_id = 0, search = '', start_date = 0, end_date = 0 } = {} ) {
 
+    const baseUrl   = `${CF7Apps.restURL}cf7apps/v1/get-cf7-entries`;
+    const separator = baseUrl.includes( '?' ) ? '&' : '?';
+    const url       = `${ baseUrl }${ separator }page=${ page }&per-page=${ perPage }&form-id=${ form_id }&search=${ search }&start-date=${ start_date }&end-date=${ end_date }`;
+
     const response = await fetch(
-        `${CF7Apps.restURL}cf7apps/v1/get-cf7-entries?page=${ page }&per-page=${ perPage }&form-id=${ form_id }&search=${ search }&start-date=${ start_date }&end-date=${ end_date }`, {
+        url, {
             headers: headers,
             method: 'GET'
         }
@@ -195,7 +199,12 @@ export async function deleteCF7Entries( entryIds = [] ) {
     // serialize the entry IDs to a query string
     const queryString = entryIds.map( id => `entry_ids[]=${ encodeURIComponent( id ) }` ).join( '&' );
 
-    const response = await fetch( `${CF7Apps.restURL}cf7apps/v1/delete-cf7-entries?${ queryString }`, {
+    const baseUrl   = `${CF7Apps.restURL}cf7apps/v1/delete-cf7-entries`;
+    const separator = baseUrl.includes( '?' ) ? '&' : '?';
+    const url       = `${ baseUrl }${ separator }${ queryString }`;
+
+    const response = await fetch(
+        url, {
             headers: headers,
             method: 'GET',
     } );
@@ -223,6 +232,23 @@ export async function getAllCF7Forms() {
     );
 
     if (!response.ok) {
+        return false;
+    }
+
+    const json = await response.json();
+
+    return json.data;
+}
+
+export async function fetchSpamCount() {
+    const response = await fetch(
+        `${CF7Apps.restURL}cf7apps/v1/spam-count`, {
+            headers: headers,
+            method: 'GET'
+        }
+    );
+
+    if ( ! response.ok ) {
         return false;
     }
 

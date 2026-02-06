@@ -88,3 +88,73 @@ function cf7apps_get_default_settings() {
     );
 }
 endif;
+
+if ( ! function_exists( 'cf7apps_get_post_types_options' ) ) :
+    /**
+     * Get Post Types Options
+     *
+     * @since 3.2.0
+     * @return array
+     */
+    function cf7apps_get_post_types_options() {
+        // Default: posts + pages (filterable).
+        $default_post_types = array( 'post', 'page' );
+
+        // Filterable list of post types for the dropdown.
+        $post_type_slugs = apply_filters( 'cf7apps_redirection_post_types', $default_post_types );
+
+        // Unique, non-empty slugs only.
+        $post_type_slugs = array_values( array_filter( array_unique( (array) $post_type_slugs ) ) );
+
+        $query_args = array(
+            'post_type'      => $post_type_slugs,
+            'posts_per_page' => -1,
+            'post_status'    => 'publish',
+            'fields'         => 'ids',
+            'no_found_rows'  => true,
+        );
+
+        $options  = array();
+        $post_ids = get_posts( $query_args );
+
+        foreach ( $post_ids as $post_id ) {
+            $title = get_post_field( 'post_title', $post_id );
+
+            if ( '' === $title ) {
+                /* translators: %d: post ID. */
+                $title = sprintf( __( '(no title) (ID: %d)', 'cf7apps' ), $post_id );
+            }
+
+            $options[ $post_id ] = sprintf( '%s (ID: %d)', $title, $post_id );
+        }
+
+        return $options;
+    }
+endif;
+
+if ( ! function_exists( 'cf7apps_save_internal_app_settings' ) ) :
+    /**
+     * Save Internal App Settings
+     *
+     * @since 3.2.0
+     * @param string     $id App ID.
+     * @param string|int $form_id CF7 Form ID.
+     * @param array      $app_settings App Settings.
+     *
+     * @return bool
+     */
+    function cf7apps_save_internal_app_settings( $id, $form_id, $app_settings  ) {
+        $settings = get_post_meta( $form_id, 'cf7apps_settings', true );
+        if ( ! is_array( $settings ) ) {
+            $settings = array();
+        }
+
+        if ( isset( $settings[ $id ] ) ) {
+            $settings[ $id ] = array_merge( $settings[ $id ], $app_settings );
+        } else {
+            $settings[ $id ] = $app_settings;
+        }
+
+        return update_post_meta( $form_id, 'cf7apps_settings', $settings );
+    }
+endif;
