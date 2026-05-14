@@ -461,6 +461,11 @@ if ( ! class_exists( 'CF7Apps_Webhook' ) && class_exists( 'CF7Apps_App' ) ) :
                 // Replace individual field placeholders
                 foreach ( $mapped_data as $field_name => $field_value ) {
                     $placeholder = '[' . $field_name . ']';
+
+					if ( is_array( $field_value ) ) {
+						$field_value = implode( ', ', $field_value );
+					}
+
                     $payload_template = str_replace( $placeholder, $field_value, $payload_template );
                 }
                 

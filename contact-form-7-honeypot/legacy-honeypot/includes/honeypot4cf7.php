@@ -75,7 +75,15 @@ function honeypot4cf7_form_tag_handler( $tag ) {
 		'timecheck_enabled'	=> ( $tag->get_option( 'timecheck_enabled' ) ) ? $tag->get_option( 'timecheck_enabled' ) : $honeypot4cf7_config['timecheck_enabled'],
 		'timecheck_value'	=> ( $timecheck_value = $tag->get_option( 'timecheck_value' ) ) ? reset($timecheck_value) : $honeypot4cf7_config['timecheck_value'],
 		'validation_error'	=> $validation_error,
-		'css'				=> apply_filters( 'wpcf7_honeypot_container_css', 'display:none !important; visibility:hidden !important;' ),
+		'css'				=> apply_filters( 'wpcf7_honeypot_container_css', 'display: block;
+		    width: 0px;
+		    height: 0px;
+		    padding: 0px;
+		    border: 1px solid transparent;
+		    display: block;
+		    overflow: hidden;
+		    '
+        ),
 	);
 
 	$unique_id = uniqid( 'wpcf7-' );
@@ -86,7 +94,10 @@ function honeypot4cf7_form_tag_handler( $tag ) {
 
 	// Check if we should move the CSS off the element and into the footer
 	if ( ! empty( $atts['move_inline_css'] ) && $atts['move_inline_css'][0] === 'true' ) {
-		$hp_css = '#' . $wrapper_id . ' {' . $atts['css'] . '}';
+		$hp_css = '#' . $wrapper_id . ' {
+		    ' . $atts['css'] . '
+		}
+		';
 		wp_register_style( $unique_id . '-inline', false );
 		wp_enqueue_style( $unique_id . '-inline' );
 		wp_add_inline_style( $unique_id . '-inline', $hp_css );
@@ -95,18 +106,47 @@ function honeypot4cf7_form_tag_handler( $tag ) {
 		$el_css = 'style="' . $atts['css'] . '"';
 	}
 
+	$dynamic_honeypot_name = sanitize_key( wp_generate_password( 12, false, false ) );
 	$html = '<span id="' . $wrapper_id . '" class="wpcf7-form-control-wrap ' . $atts['name'] . '-wrap" ' . $el_css . '>';
 	
-	if ( !empty( $atts['timecheck_enabled'] ) && $atts['timecheck_enabled'][0] !== 'false' ) {
-		$html .= '<input type="hidden" name="'.$atts['name'].'-time-start" value="'.time().'">';
-		$html .= '<input type="hidden" name="'.$atts['name'].'-time-check" value="'.$atts['timecheck_value'].'">';
+    $random_hash     = wp_rand( 10000000, 99999999 );
+    $html           .= '<input type="hidden" name="'.$atts['name'].'-random-hash" value="'.$random_hash.'">';
+    $transient_name  = $atts['name'] . '-' . $random_hash;
+    $transient_attrs = array(
+        'expected_hp_name' => $dynamic_honeypot_name,
+        'time_start'       => time(),
+    );
+
+	if ( ! empty( $atts['timecheck_enabled'] ) && $atts['timecheck_enabled'][0] !== 'false' ) {
+		// Removed exposed -time-start and -time-check fields for security.
+		// All timestamp data is now stored server-side in transients only.
+        $transient_attrs['time_check'] = $atts['timecheck_value'];
 	}
+
+    set_transient(
+            $transient_name,
+            $transient_attrs,
+            60*60
+    );
 
 	if ( empty( $atts['nomessage'] ) || $atts['nomessage'][0] === 'false' ) {
-		$html .= '<label for="' . $input_id . '" class="hp-message">' . $atts['message'] . '</label>';
+		$html .= '<label
+		    for="' . $input_id . '"
+		    class="hp-message"
+        >' . $atts['message'] . '</label>';
 	}
 
-	$html .= '<input id="' . $input_id . '" ' . $input_placeholder . ' class="' . $atts['class'] . '" type="text" name="' . $atts['name'] . '" value="" size="40" tabindex="-1" autocomplete="'. $autocomplete_value . '" />';
+	$html .= '<input
+	    id="' . $input_id . '"
+	    ' . $input_placeholder . '
+	    class="' . $atts['class'] . '"
+	    type="text"
+	    name="' . $dynamic_honeypot_name . '"
+	    value=""
+	    size="40"
+	    autocomplete="'. $autocomplete_value . '"
+	    tabindex="1000"
+    />';
 	$html .= $validation_error . '</span>';
 
 	// Hook for filtering finished Honeypot form element.
@@ -156,31 +196,232 @@ function honeypot4cf7_spam_check( $spam, $submission = null ) {
 		$honeypot4cf7_config = honeypot4cf7_get_config();
         $cf7apps_settings = get_option( 'cf7apps_settings' );
 
-		$value = isset( $_POST[$hpid] ) ? $_POST[$hpid] : '';
+		$random_hash = isset( $_POST[ $hpid . '-random-hash' ] ) ? $_POST[ $hpid . '-random-hash' ] : '';
+		
+		// Validate random hash exists and matches expected format (8-9 digits)
+		if ( empty( $random_hash ) || ! preg_match( '/^\d{8,9}$/', $random_hash ) ) {
+			$spam = true;
+			if ( $submission ) {
+				$submission->add_spam_log( array(
+					'agent' => 'honeypot',
+					'reason' => sprintf(
+						/* translators: %s: honeypot field ID */
+						__( 'Honeypot detected invalid or missing random hash. Field ID = %s', 'contact-form-7-honeypot' ),
+						$hpid
+					),
+				) );
+			}
 
-		// SPAM CHECK #1: Let's check submission speed first, as it's time sensitive. :)
-		$timecheck_start = isset( $_POST[$hpid.'-time-start'] ) ? $_POST[$hpid.'-time-start'] : '';
-
-		if ( $timecheck_start ) {
-			$submission_time = time();
-			$timecheck_value = isset( $_POST[$hpid.'-time-check'] ) ? $_POST[$hpid.'-time-check'] : '';
-			$submission_interval = $submission_time - $timecheck_start;
-			
-			if ( $submission_interval < $timecheck_value ) {
-				// Fast Bots!
-				$spam = true;
+			if( $cf7apps_settings ) {
+				// Backward compatibility for CF7APPS settings
+				$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
 				
-				if ( $submission ) {
-					$submission->add_spam_log( array(
-						'agent' => 'honeypot',
-						'reason' => sprintf(
-							/* translators: 1: submission interval integer 2: honeypot field ID */
-							__( 'Honeypot detected form submitted too fast (%1$s seconds). Field ID = %2$s', 'contact-form-7-honeypot' ), 
-							$submission_interval,
-							$hpid
-						),
+				cf7apps_save_app_settings( 'honeypot', array(
+					'honeypot_count'    => $honeypot4cf7_config['honeypot_count'],
+				) );
+			}
+			else {
+				$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+				
+				update_option( 'honeypot4cf7_config', $honeypot4cf7_config );
+			}
+
+			return $spam;
+		}
+		
+        $transient_data = get_transient( $hpid . '-' . $random_hash );
+        
+        // Validate transient data exists and is valid array
+        if ( ! is_array( $transient_data ) || empty( $transient_data ) ) {
+            // No transient data found - likely spam or expired
+            $spam = true;
+            if ( $submission ) {
+                $submission->add_spam_log( array(
+                    'agent' => 'honeypot',
+                    'reason' => sprintf(
+                        /* translators: %s: honeypot field ID */
+                        __( 'Honeypot detected form submitted without valid time check data. Field ID = %s', 'contact-form-7-honeypot' ),
+                        $hpid
+                    ),
+                ) );
+            }
+
+			if( $cf7apps_settings ) {
+				// Backward compatibility for CF7APPS settings
+				$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+				
+				cf7apps_save_app_settings( 'honeypot', array(
+					'honeypot_count'    => $honeypot4cf7_config['honeypot_count'],
+				) );
+			}
+			else {
+				$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+				
+				update_option( 'honeypot4cf7_config', $honeypot4cf7_config );
+			}
+
+            return $spam;
+        }
+
+        $timecheck_start = isset( $transient_data['time_start'] ) ? (int) $transient_data['time_start'] : 0;
+        $timecheck_value = isset( $transient_data['time_check'] ) ? (int) $transient_data['time_check'] : 0;
+		$expected_hp_name = isset( $transient_data['expected_hp_name'] ) ? sanitize_key( $transient_data['expected_hp_name'] ) : '';
+
+		if ( empty( $expected_hp_name ) ) {
+			$spam = true;
+			if ( $submission ) {
+				$submission->add_spam_log( array(
+					'agent' => 'honeypot',
+					'reason' => sprintf(
+						/* translators: %s: honeypot field ID */
+						__( 'Honeypot missing dynamic field metadata. Field ID = %s', 'contact-form-7-honeypot' ),
+						$hpid
+					),
+				) );
+			}
+
+			if( $cf7apps_settings ) {
+				// Backward compatibility for CF7APPS settings
+				$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+				
+				cf7apps_save_app_settings( 'honeypot', array(
+					'honeypot_count'    => $honeypot4cf7_config['honeypot_count'],
+				) );
+			}
+			else {
+				$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+				
+				update_option( 'honeypot4cf7_config', $honeypot4cf7_config );
+			}
+
+			return $spam;
+		}
+
+		if ( ! array_key_exists( $expected_hp_name, $_POST ) ) {
+			$spam = true;
+			if ( $submission ) {
+				$submission->add_spam_log( array(
+					'agent' => 'honeypot',
+					'reason' => sprintf(
+						/* translators: 1: honeypot field ID 2: expected dynamic field name */
+						__( 'Honeypot expected dynamic field "%2$s" was missing. Field ID = %1$s', 'contact-form-7-honeypot' ),
+						$hpid,
+						$expected_hp_name
+					),
+				) );
+			}
+
+			if( $cf7apps_settings ) {
+				// Backward compatibility for CF7APPS settings
+				$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+				
+				cf7apps_save_app_settings( 'honeypot', array(
+					'honeypot_count'    => $honeypot4cf7_config['honeypot_count'],
+				) );
+			}
+			else {
+				$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+				
+				update_option( 'honeypot4cf7_config', $honeypot4cf7_config );
+			}
+
+			return $spam;
+		}
+
+		$value = isset( $_POST[ $expected_hp_name ] ) ? $_POST[ $expected_hp_name ] : '';
+        
+        // Validate timecheck_value exists and is valid, fallback to config if needed
+        if ( $timecheck_value <= 0 ) {
+            // Get default from config if transient doesn't have it
+            $timecheck_value = isset( $honeypot4cf7_config['timecheck_value'] ) ? (int) $honeypot4cf7_config['timecheck_value'] : 4;
+        }
+        
+        if ( $timecheck_start > 0 ) {
+            $submission_time = time();
+            $submission_interval = $submission_time - $timecheck_start;
+
+            // Validate timestamp is not in the future (bots submitting future timestamps)
+            if ( $timecheck_start > $submission_time ) {
+                $spam = true;
+                if ( $submission ) {
+                    $submission->add_spam_log( array(
+                        'agent' => 'honeypot',
+                        'reason' => sprintf(
+                            /* translators: 1: honeypot field ID 2: future timestamp */
+                            __( 'Honeypot detected future timestamp (timestamp: %2$s). Field ID = %1$s', 'contact-form-7-honeypot' ), 
+                            $hpid,
+                            date( 'Y-m-d H:i:s', $timecheck_start )
+                        ),
+                    ) );
+                }
+
+				if( $cf7apps_settings ) {
+					// Backward compatibility for CF7APPS settings
+					$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+					
+					cf7apps_save_app_settings( 'honeypot', array(
+						'honeypot_count'    => $honeypot4cf7_config['honeypot_count'],
 					) );
 				}
+				else {
+					$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+					
+					update_option( 'honeypot4cf7_config', $honeypot4cf7_config );
+				}
+
+                return $spam;
+            }
+
+            // Validate timestamp is not too old (prevent replay attacks - max 2 hours)
+            $max_age = 60 * 60 * 2; // 2 hours
+            if ( $submission_interval > $max_age ) {
+                $spam = true;
+                if ( $submission ) {
+                    $submission->add_spam_log( array(
+                        'agent' => 'honeypot',
+                        'reason' => sprintf(
+                            /* translators: 1: honeypot field ID 2: age in hours */
+                            __( 'Honeypot detected stale timestamp (replay attack, age: %2$.1f hours). Field ID = %1$s', 'contact-form-7-honeypot' ), 
+                            $hpid,
+                            $submission_interval / 3600
+                        ),
+                    ) );
+                }
+
+				if( $cf7apps_settings ) {
+					// Backward compatibility for CF7APPS settings
+					$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+					
+					cf7apps_save_app_settings( 'honeypot', array(
+						'honeypot_count'    => $honeypot4cf7_config['honeypot_count'],
+					) );
+				}
+				else {
+					$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+					
+					update_option( 'honeypot4cf7_config', $honeypot4cf7_config );
+				}
+
+                return $spam;
+            }
+
+            // Check if form was submitted too fast
+            if ( $submission_interval < $timecheck_value ) {
+                // Fast Bots!
+                $spam = true;
+
+                if ( $submission ) {
+                    $submission->add_spam_log( array(
+                        'agent' => 'honeypot',
+                        'reason' => sprintf(
+                            /* translators: 1: submission interval integer 2: honeypot field ID 3: required time */
+                            __( 'Honeypot detected form submitted too fast (%1$s seconds, required: %3$s seconds). Field ID = %2$s', 'contact-form-7-honeypot' ), 
+                            $submission_interval,
+                            $hpid,
+                            $timecheck_value
+                        ),
+                    ) );
+                }
 
                 if( $cf7apps_settings ) {
                     // Backward compatibility for CF7APPS settings
@@ -195,11 +436,40 @@ function honeypot4cf7_spam_check( $spam, $submission = null ) {
                     
                     update_option( 'honeypot4cf7_config', $honeypot4cf7_config );
                 }
-				
-				return $spam; // There's no need to go on, this is most likely a bot submission.
 
+                return $spam; // There's no need to go on, this is most likely a bot submission.
+            }
+        } else {
+            // No time check start found in transient
+            $spam = true;
+
+            if ( $submission ) {
+                $submission->add_spam_log( array(
+                    'agent' => 'honeypot',
+                    'reason' => sprintf(
+                        /* translators: %s: honeypot field ID */
+                        __( 'Honeypot detected form submitted without time check. Field ID = %s', 'contact-form-7-honeypot' ),
+                        $hpid
+                    ),
+                ) );
+            }
+
+			if( $cf7apps_settings ) {
+				// Backward compatibility for CF7APPS settings
+				$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+				
+				cf7apps_save_app_settings( 'honeypot', array(
+					'honeypot_count'    => $honeypot4cf7_config['honeypot_count'],
+				) );
 			}
-		}
+			else {
+				$honeypot4cf7_config['honeypot_count'] = ( isset( $honeypot4cf7_config['honeypot_count'] ) ) ? $honeypot4cf7_config['honeypot_count'] + 1 : 1;
+				
+				update_option( 'honeypot4cf7_config', $honeypot4cf7_config );
+			}
+
+            return $spam; // There's no need to go on, this is most likely a bot submission.
+        }
 
 		// SPAM CHECK #2: Now we check the honeypot!
 		if ( $value != '' ) {
@@ -210,9 +480,10 @@ function honeypot4cf7_spam_check( $spam, $submission = null ) {
 				$submission->add_spam_log( array(
 					'agent' => 'honeypot',
 					'reason' => sprintf(
-						/* translators: %s: honeypot field ID */
-						__( 'Something is stuck in the honey. Field ID = %s', 'contact-form-7-honeypot' ), 
-						$hpid
+						/* translators: 1: honeypot field ID 2: dynamic field name */
+						__( 'Something is stuck in the honey. Field ID = %1$s (dynamic field: %2$s)', 'contact-form-7-honeypot' ), 
+						$hpid,
+						$expected_hp_name
 					),
 				) );
 			}
@@ -491,3 +762,38 @@ function honeypot4cf7_form_tag_generator( $contact_form, $args = '' ) {
         <?php
     }
 }
+
+/**
+ * Delete transient data after form submission is successful
+ * 
+ * @since 3.1.0
+ */
+function honeypot4cf7_delete_transient_data() {
+    $cf7form = WPCF7_ContactForm::get_current();
+    $form_tags = $cf7form->scan_form_tags();
+    $hp_ids = array();
+
+    foreach ( $form_tags as $tag ) {
+        if ( $tag->type == 'honeypot' ) {
+            $hp_ids[] = $tag->name;
+        }
+    }
+
+    
+    foreach ( $hp_ids as $hpid ) {
+        if ( isset( $_POST[ $hpid . '-random-hash' ] ) ) {
+            $key = $hpid . '-' . $_POST[ $hpid . '-random-hash' ];
+            $data = get_transient( $key );
+            delete_transient( $key );
+
+            if ( is_array( $data ) ) {
+                $data['time_start'] = time();
+                set_transient( $key, $data, 60*60*2 );
+            }
+        }
+    }
+
+    return true;
+}
+
+add_action( 'wpcf7_mail_sent', 'honeypot4cf7_delete_transient_data' );
