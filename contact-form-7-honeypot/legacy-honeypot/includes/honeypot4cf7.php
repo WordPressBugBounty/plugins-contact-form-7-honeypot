@@ -8,6 +8,109 @@
 defined( 'ABSPATH' ) || exit;
 
 /**
+ * Whether the honeypot app is enabled in CF7 Apps settings.
+ *
+ * @return bool
+ */
+function honeypot4cf7_is_app_enabled() {
+	$cf7apps_settings = get_option( 'cf7apps_settings' );
+
+	if ( $cf7apps_settings && isset( $cf7apps_settings['honeypot']['is_enabled'] ) ) {
+		return (bool) $cf7apps_settings['honeypot']['is_enabled'];
+	}
+
+	return true;
+}
+
+/**
+ * Whether time-check is enabled for the given option value.
+ *
+ * @param mixed $timecheck_enabled Option value from tag or config.
+ * @return bool
+ */
+function honeypot4cf7_timecheck_is_enabled( $timecheck_enabled ) {
+	if ( empty( $timecheck_enabled ) ) {
+		return false;
+	}
+
+	if ( is_array( $timecheck_enabled ) ) {
+		return isset( $timecheck_enabled[0] ) && 'false' !== $timecheck_enabled[0];
+	}
+
+	return 'false' !== $timecheck_enabled && false !== $timecheck_enabled;
+}
+
+/**
+ * Create a fresh honeypot token and store its transient.
+ *
+ * @param string $field_name         Honeypot field name.
+ * @param mixed  $timecheck_enabled  Time-check enabled option.
+ * @param mixed  $timecheck_value    Time-check seconds.
+ * @return array{random_hash:int,field_name:string,transient_name:string}
+ */
+function honeypot4cf7_create_token( $field_name, $timecheck_enabled = null, $timecheck_value = null ) {
+	$honeypot4cf7_config = honeypot4cf7_get_config();
+
+	if ( null === $timecheck_enabled ) {
+		$timecheck_enabled = $honeypot4cf7_config['timecheck_enabled'];
+	}
+
+	if ( null === $timecheck_value ) {
+		$timecheck_value = $honeypot4cf7_config['timecheck_value'];
+	}
+
+	$dynamic_honeypot_name = sanitize_key( wp_generate_password( 12, false, false ) );
+	$random_hash           = wp_rand( 10000000, 99999999 );
+	$transient_name        = $field_name . '-' . $random_hash;
+	$transient_attrs       = array(
+		'expected_hp_name' => $dynamic_honeypot_name,
+		'time_start'       => time(),
+	);
+
+	if ( honeypot4cf7_timecheck_is_enabled( $timecheck_enabled ) ) {
+		$transient_attrs['time_check'] = is_array( $timecheck_value )
+			? (int) reset( $timecheck_value )
+			: (int) $timecheck_value;
+	}
+
+	set_transient( $transient_name, $transient_attrs, HOUR_IN_SECONDS );
+
+	return array(
+		'random_hash'    => $random_hash,
+		'field_name'     => $dynamic_honeypot_name,
+		'transient_name' => $transient_name,
+	);
+}
+
+/**
+ * Enqueue honeypot refill script for cached pages.
+ */
+function honeypot4cf7_enqueue_refill_script() {
+	if ( is_admin() || ! honeypot4cf7_is_app_enabled() ) {
+		return;
+	}
+
+	wp_enqueue_script(
+		'cf7apps-honeypot-refill',
+		CF7APPS_PLUGIN_DIR_URL . '/legacy-honeypot/includes/js/honeypot-refill.js',
+		array( 'contact-form-7' ),
+		CF7APPS_VERSION,
+		true
+	);
+
+	$force_refill = ( defined( 'WP_CACHE' ) && WP_CACHE ) || class_exists( 'Cache_Enabler', false );
+
+	wp_localize_script(
+		'cf7apps-honeypot-refill',
+		'cf7appsHoneypotRefill',
+		array(
+			'forceRefillOnInit' => apply_filters( 'honeypot4cf7_force_refill', $force_refill ),
+		)
+	);
+}
+add_action( 'wpcf7_enqueue_scripts', 'honeypot4cf7_enqueue_refill_script' );
+
+/**
  *
  * Initialize the shortcode
  * 		This lets CF7 know about Mr. Honeypot.
@@ -106,28 +209,15 @@ function honeypot4cf7_form_tag_handler( $tag ) {
 		$el_css = 'style="' . $atts['css'] . '"';
 	}
 
-	$dynamic_honeypot_name = sanitize_key( wp_generate_password( 12, false, false ) );
-	$html = '<span id="' . $wrapper_id . '" class="wpcf7-form-control-wrap ' . $atts['name'] . '-wrap" ' . $el_css . '>';
-	
-    $random_hash     = wp_rand( 10000000, 99999999 );
-    $html           .= '<input type="hidden" name="'.$atts['name'].'-random-hash" value="'.$random_hash.'">';
-    $transient_name  = $atts['name'] . '-' . $random_hash;
-    $transient_attrs = array(
-        'expected_hp_name' => $dynamic_honeypot_name,
-        'time_start'       => time(),
-    );
+	$token = honeypot4cf7_create_token(
+		$atts['name'],
+		$atts['timecheck_enabled'],
+		$atts['timecheck_value']
+	);
 
-	if ( ! empty( $atts['timecheck_enabled'] ) && $atts['timecheck_enabled'][0] !== 'false' ) {
-		// Removed exposed -time-start and -time-check fields for security.
-		// All timestamp data is now stored server-side in transients only.
-        $transient_attrs['time_check'] = $atts['timecheck_value'];
-	}
+	$html = '<span id="' . esc_attr( $wrapper_id ) . '" class="wpcf7-form-control-wrap ' . esc_attr( $atts['name'] ) . '-wrap" data-cf7apps-honeypot="' . esc_attr( $atts['name'] ) . '" ' . $el_css . '>';
 
-    set_transient(
-            $transient_name,
-            $transient_attrs,
-            60*60
-    );
+	$html .= '<input type="hidden" name="' . esc_attr( $atts['name'] ) . '-random-hash" value="' . esc_attr( (string) $token['random_hash'] ) . '">';
 
 	if ( empty( $atts['nomessage'] ) || $atts['nomessage'][0] === 'false' ) {
 		$html .= '<label
@@ -141,7 +231,7 @@ function honeypot4cf7_form_tag_handler( $tag ) {
 	    ' . $input_placeholder . '
 	    class="' . $atts['class'] . '"
 	    type="text"
-	    name="' . $dynamic_honeypot_name . '"
+	    name="' . esc_attr( $token['field_name'] ) . '"
 	    value=""
 	    size="40"
 	    autocomplete="'. $autocomplete_value . '"
@@ -152,6 +242,66 @@ function honeypot4cf7_form_tag_handler( $tag ) {
 	// Hook for filtering finished Honeypot form element.
 	return apply_filters( 'wpcf7_honeypot_html_output' , $html, $atts );
 }
+
+
+/**
+ * Normalize honeypot values in posted data based on store setting.
+ *
+ * Dynamic honeypot field names bypass CF7 do-not-store, so map or strip them here.
+ *
+ * @param array $posted_data Posted form data.
+ * @return array
+ */
+function honeypot4cf7_filter_posted_data( $posted_data ) {
+	if ( ! is_array( $posted_data ) ) {
+		return $posted_data;
+	}
+
+	$honeypot4cf7_config = honeypot4cf7_get_config();
+	$store_honeypot      = ! empty( $honeypot4cf7_config['store_honeypot'] );
+	$tags                = wpcf7_scan_form_tags( array( 'type' => 'honeypot' ) );
+
+	if ( empty( $tags ) ) {
+		return $posted_data;
+	}
+
+	foreach ( $tags as $tag ) {
+		$hpid = $tag->name;
+
+		if ( empty( $hpid ) ) {
+			continue;
+		}
+
+		unset( $posted_data[ $hpid . '-random-hash' ] );
+
+		$random_hash      = isset( $_POST[ $hpid . '-random-hash' ] ) ? (string) wp_unslash( $_POST[ $hpid . '-random-hash' ] ) : '';
+		$expected_hp_name = '';
+		$dynamic_value    = '';
+
+		if ( '' !== $random_hash ) {
+			$transient_data = get_transient( $hpid . '-' . $random_hash );
+
+			if ( is_array( $transient_data ) && ! empty( $transient_data['expected_hp_name'] ) ) {
+				$expected_hp_name = sanitize_key( $transient_data['expected_hp_name'] );
+			}
+		}
+
+		if ( '' !== $expected_hp_name && isset( $posted_data[ $expected_hp_name ] ) ) {
+			$dynamic_value = $posted_data[ $expected_hp_name ];
+			unset( $posted_data[ $expected_hp_name ] );
+		}
+
+		if ( $store_honeypot ) {
+			$posted_data[ $hpid ] = $dynamic_value;
+		} else {
+			unset( $posted_data[ $hpid ] );
+		}
+	}
+
+	return $posted_data;
+}
+
+add_filter( 'wpcf7_posted_data', 'honeypot4cf7_filter_posted_data', 20, 1 );
 
 
 /**
@@ -180,6 +330,7 @@ function honeypot4cf7_spam_check( $spam, $submission = null ) {
 
 	$cf7form = WPCF7_ContactForm::get_current();
 	$form_tags = $cf7form->scan_form_tags();
+	$hp_ids    = array();
 	
 	foreach ( $form_tags as $tag ) {
 		if ( $tag->type == 'honeypot' ) {
@@ -328,11 +479,28 @@ function honeypot4cf7_spam_check( $spam, $submission = null ) {
 			return $spam;
 		}
 
-		$value = isset( $_POST[ $expected_hp_name ] ) ? $_POST[ $expected_hp_name ] : '';
-        
-        // Validate timecheck_value exists and is valid, fallback to config if needed
-        if ( $timecheck_value <= 0 ) {
-            // Get default from config if transient doesn't have it
+		$value = isset( $_POST[ $expected_hp_name ] ) ? trim( wp_unslash( (string) $_POST[ $expected_hp_name ] ) ) : '';
+
+		if ( '' === $value && isset( $_POST[ $hpid ] ) ) {
+			$value = trim( wp_unslash( (string) $_POST[ $hpid ] ) );
+		}
+
+		if ( '' === $value && $submission ) {
+			$posted_data = $submission->get_posted_data();
+
+			if ( isset( $posted_data[ $expected_hp_name ] ) ) {
+				$value = trim( (string) $posted_data[ $expected_hp_name ] );
+			}
+
+			if ( '' === $value && isset( $posted_data[ $hpid ] ) ) {
+				$value = trim( (string) $posted_data[ $hpid ] );
+			}
+		}
+
+        // Time check only applies when the token was created with time_check (setting/tag enabled).
+        $timecheck_active = isset( $transient_data['time_check'] ) && (int) $transient_data['time_check'] > 0;
+
+        if ( $timecheck_active && $timecheck_value <= 0 ) {
             $timecheck_value = isset( $honeypot4cf7_config['timecheck_value'] ) ? (int) $honeypot4cf7_config['timecheck_value'] : 4;
         }
         
@@ -406,7 +574,7 @@ function honeypot4cf7_spam_check( $spam, $submission = null ) {
             }
 
             // Check if form was submitted too fast
-            if ( $submission_interval < $timecheck_value ) {
+            if ( $timecheck_active && $submission_interval < $timecheck_value ) {
                 // Fast Bots!
                 $spam = true;
 
